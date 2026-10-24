@@ -1,0 +1,8 @@
+# Ablation: identical to default.yaml except lambda_cldice = 0.
+base: default.yaml
+
+loss:
+  cldice: 0.0
+
+train:
+  out_dir: runs/no_cldice

@@ -1,0 +1,15 @@
+# PyTorch for Blackwell GPUs (sm_120) needs a CUDA 12.8+ build:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu128
+torch>=2.7
+torchvision
+timm>=1.0
+albumentations>=2.0
+scikit-image>=0.24
+opencv-python-headless
+tifffile
+numpy
+pandas
+pyyaml
+tensorboard
+matplotlib
+pytest

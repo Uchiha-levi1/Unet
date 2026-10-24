@@ -1,0 +1,6 @@
+.venv/
+runs/
+data/
+dataset_main/
+__pycache__/
+*.zip

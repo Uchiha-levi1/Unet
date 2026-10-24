@@ -1,0 +1,46 @@
+seed: 42
+
+data:
+  root: data                     # contains metadata.csv and tiff/
+  cache_dir: data/cache          # centerline targets + training-set stats
+  crop_size: 512
+  max_white_frac: 0.5            # skip crops where more image pixels than this are pure white
+  centerline_width: 3            # skeleton dilated to ~this many pixels
+  samples_per_epoch: null        # null = one random crop per training image
+  num_workers: 8
+
+model:
+  encoder: resnet34
+  pretrained: true
+  classes: [strap]               # mask head channels (multi-label, sigmoid); e.g. [strap, seal]
+  branch_channels: 64            # each full-scale skip is projected to this; fused width = 5x
+  deep_supervision: false
+  grad_checkpointing: false
+
+loss:
+  dice: 1.0
+  focal: 1.0
+  cldice: 1.0
+  centerline_bce: 1.0
+  focal_alpha: 0.25              # null disables alpha weighting
+  focal_gamma: 2.0
+  cldice_iters: 5
+  pos_weight_cap: 30.0
+
+train:
+  out_dir: runs/default
+  epochs: 60
+  batch_size: 8
+  lr_encoder: 1.0e-4
+  lr_decoder: 1.0e-3             # decoder and heads
+  weight_decay: 1.0e-4
+  warmup_epochs: 2
+  freeze_encoder_epochs: 0
+  amp: true                      # bfloat16 autocast
+  num_vis: 4                     # validation images saved as overlays each epoch
+
+eval:
+  tile: 512
+  overlap: 0.25
+  tile_batch: 8
+  threshold: 0.5
