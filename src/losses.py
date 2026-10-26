@@ -4,24 +4,32 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def soft_dice_loss(logits, target, smooth=1.0):
-    """1 - Dice, per channel over the whole batch, averaged over channels."""
+def dice_per_channel(logits, target, smooth=1.0):
+    """1 - Dice per channel, computed over the whole batch (so a class absent from one image is harmless). (C,)"""
     p = torch.sigmoid(logits)
     dims = (0, 2, 3)
     inter = (p * target).sum(dims)
     denom = p.sum(dims) + target.sum(dims)
-    return (1 - (2 * inter + smooth) / (denom + smooth)).mean()
+    return 1 - (2 * inter + smooth) / (denom + smooth)
 
 
-def focal_loss(logits, target, gamma=2.0, alpha=0.25):
-    """Sigmoid focal loss (Lin et al., 2017), mean over pixels."""
+def soft_dice_loss(logits, target, smooth=1.0):
+    return dice_per_channel(logits, target, smooth).mean()
+
+
+def focal_per_channel(logits, target, gamma=2.0, alpha=None):
+    """Sigmoid focal loss (Lin et al., 2017), mean over all pixels of each channel. (C,)"""
     bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
     p = torch.sigmoid(logits)
     p_t = p * target + (1 - p) * (1 - target)
     loss = (1 - p_t) ** gamma * bce
     if alpha is not None:
         loss = (alpha * target + (1 - alpha) * (1 - target)) * loss
-    return loss.mean()
+    return loss.mean(dim=(0, 2, 3))
+
+
+def focal_loss(logits, target, gamma=2.0, alpha=None):
+    return focal_per_channel(logits, target, gamma, alpha).mean()
 
 
 # --- Soft skeleton (Shit et al., CVPR 2021) ---------------------------------------------------
@@ -54,12 +62,13 @@ def soft_skeleton(x, iterations):
     return skel
 
 
-def soft_cldice_loss(logits, target, iterations=5, smooth=1.0):
+def soft_cldice_loss(logits, target, iterations=5, smooth=1.0, skel_target=None):
     """1 - clDice: harmonic mean of topology precision (pred skeleton inside GT mask)
-    and topology sensitivity (GT skeleton inside predicted mask)."""
+    and topology sensitivity (GT skeleton inside predicted mask).
+    skel_target: a given GT skeleton (e.g. the stored 1 px centerline); default = soft skeleton of the GT mask."""
     p = torch.sigmoid(logits)
     skel_p = soft_skeleton(p, iterations)
-    skel_t = soft_skeleton(target, iterations)
+    skel_t = soft_skeleton(target, iterations) if skel_target is None else skel_target
     dims = (0, 2, 3)
     tprec = ((skel_p * target).sum(dims) + smooth) / (skel_p.sum(dims) + smooth)
     tsens = ((skel_t * p).sum(dims) + smooth) / (skel_t.sum(dims) + smooth)
@@ -67,38 +76,54 @@ def soft_cldice_loss(logits, target, iterations=5, smooth=1.0):
 
 
 class SegLoss(nn.Module):
-    """Total = λ_dice·Dice + λ_focal·Focal + λ_cldice·clDice (final mask output)
-             + λ_cl·weighted BCE (centerline)
-             + Σ_side (λ_dice·Dice + λ_focal·Focal) when deep-supervision outputs are present."""
+    """Total = Σ_c λ_c·(Dice_c + Focal_c)                     (every mask channel)
+             + Σ_k w_k·clDice_k                                (configured classes, final output only)
+             + λ_cl·weighted BCE                               (strap centerline head, 3 px target)
+             + Σ_side Σ_c λ_c·(Dice_c + Focal_c)               (deep supervision: side classes only)
 
-    def __init__(self, loss_cfg, centerline_pos_weight):
+    Targets come as a dict: "mask" (B,C,H,W) plus the centerline maps named in the config."""
+
+    CENTERLINE_TARGET = "strap_cl_3px"
+
+    def __init__(self, loss_cfg, classes, centerline_pos_weight, side_classes=()):
         super().__init__()
-        self.w = {k: loss_cfg[k] for k in ("dice", "focal", "cldice", "centerline_bce")}
-        self.alpha, self.gamma = loss_cfg["focal_alpha"], loss_cfg["focal_gamma"]
-        self.iters = loss_cfg["cldice_iters"]
+        self.classes = list(classes)
+        self.gamma, self.alpha = loss_cfg["focal_gamma"], loss_cfg["focal_alpha"]
+        self.register_buffer("lam", torch.tensor([float(loss_cfg["class_weights"][c]) for c in self.classes]))
+        # clDice terms with weight 0 are skipped entirely (the soft skeleton is comparatively expensive).
+        self.cldice = [(self.classes.index(c), c, float(v["weight"]), v["iters"], v["skeleton"])
+                       for c, v in loss_cfg["cldice"].items() if v["weight"] > 0]
+        self.w_cl = loss_cfg["centerline_bce"]
         self.register_buffer("pos_weight", torch.tensor([float(centerline_pos_weight)]))
+        self.side_idx = [self.classes.index(c) for c in side_classes]
 
-    def forward(self, out, mask, centerline):
-        logits = out["mask"].float()
-        terms = {
-            "dice": soft_dice_loss(logits, mask),
-            "focal": focal_loss(logits, mask, self.gamma, self.alpha),
-            "centerline_bce": F.binary_cross_entropy_with_logits(
-                out["centerline"].float(), centerline, pos_weight=self.pos_weight),
-        }
-        # Skip the (comparatively expensive) soft skeleton entirely in the ablation.
-        terms["cldice"] = (soft_cldice_loss(logits, mask, self.iters) if self.w["cldice"] > 0
-                           else logits.new_zeros(()))
-        total = sum(self.w[k] * v for k, v in terms.items())
+    def forward(self, out, targets):
+        logits, mask = out["mask"].float(), targets["mask"]
+        dice = dice_per_channel(logits, mask)
+        focal = focal_per_channel(logits, mask, self.gamma, self.alpha)
+        terms = {**{f"dice/{c}": dice[i] for i, c in enumerate(self.classes)},
+                 **{f"focal/{c}": focal[i] for i, c in enumerate(self.classes)}}
+        total = (self.lam * (dice + focal)).sum()
 
-        if "side" in out:  # deep supervision: Dice + focal only, never clDice
-            side_dice = side_focal = 0.0
+        for i, name, w, iters, skel_key in self.cldice:
+            v = soft_cldice_loss(logits[:, i:i + 1], mask[:, i:i + 1], iters, skel_target=targets[skel_key])
+            terms[f"cldice/{name}"] = v
+            total = total + w * v
+
+        bce = F.binary_cross_entropy_with_logits(out["centerline"].float(), targets[self.CENTERLINE_TARGET],
+                                                 pos_weight=self.pos_weight)
+        terms["centerline_bce"] = bce
+        total = total + self.w_cl * bce
+
+        if "side" in out:  # deep supervision: Dice + focal on the side classes only, never clDice
+            side_mask, lam = mask[:, self.side_idx], self.lam[self.side_idx]
+            side = 0.0
             for s in out["side"]:
                 s = s.float()
-                side_dice = side_dice + soft_dice_loss(s, mask)
-                side_focal = side_focal + focal_loss(s, mask, self.gamma, self.alpha)
-            terms["side_dice"], terms["side_focal"] = side_dice, side_focal
-            total = total + self.w["dice"] * side_dice + self.w["focal"] * side_focal
+                side = side + (lam * (dice_per_channel(s, side_mask)
+                                      + focal_per_channel(s, side_mask, self.gamma, self.alpha))).sum()
+            terms["side"] = side
+            total = total + side
 
         terms["total"] = total
-        return total, {k: float(v.detach()) for k, v in terms.items()}
+        return total, {k: v.detach() for k, v in terms.items()}

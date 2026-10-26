@@ -1,0 +1,10 @@
+# Local smoke test: RTX 5070 Laptop (8 GB). Batch 2 x 8 accumulation = effective 16.
+base: default.yaml
+
+train:
+  out_dir: runs/local
+  epochs: 2
+  batch_size: 2
+  grad_accum: 8
+  freeze_encoder_bn: true        # batch 2: batch statistics are noise, keep pretrained BN stats
+  snapshot_every: 1              # exercise checkpointing / resume in the short run

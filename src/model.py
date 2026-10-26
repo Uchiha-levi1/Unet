@@ -47,7 +47,7 @@ class FullScaleDecoderLevel(nn.Module):
 
 class UNet3Plus(nn.Module):
     def __init__(self, encoder="resnet34", pretrained=True, num_classes=1, branch_channels=64,
-                 deep_supervision=False, grad_checkpointing=False):
+                 deep_supervision=False, num_side_classes=None, grad_checkpointing=False):
         super().__init__()
         self.encoder = timm.create_model(encoder, pretrained=pretrained, features_only=True)
         enc_ch = self.encoder.feature_info.channels()
@@ -62,8 +62,9 @@ class UNet3Plus(nn.Module):
         self.centerline_head = nn.Conv2d(fused, 1, 3, padding=1)
 
         self.deep_supervision = deep_supervision
-        if deep_supervision:  # side mask heads on D2..D5
-            self.side_heads = nn.ModuleDict({str(l): nn.Conv2d(dec_ch[l - 1], num_classes, 3, padding=1)
+        if deep_supervision:  # side mask heads on D2..D5, predicting a subset of classes (large ones)
+            n_side = num_side_classes or num_classes
+            self.side_heads = nn.ModuleDict({str(l): nn.Conv2d(dec_ch[l - 1], n_side, 3, padding=1)
                                              for l in (2, 3, 4, 5)})
 
         # Checkpointing covers the decoder levels only: they hold most of the activation memory
@@ -103,4 +104,5 @@ def build_model(model_cfg):
     return UNet3Plus(encoder=model_cfg["encoder"], pretrained=model_cfg["pretrained"],
                      num_classes=len(model_cfg["classes"]), branch_channels=model_cfg["branch_channels"],
                      deep_supervision=model_cfg["deep_supervision"],
+                     num_side_classes=len(model_cfg["deep_supervision_classes"]),
                      grad_checkpointing=model_cfg["grad_checkpointing"])

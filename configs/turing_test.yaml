@@ -1,0 +1,8 @@
+# Short test run on Turing before the full training: 2 epochs (epoch 1 encoder frozen, epoch 2 unfrozen),
+# full validation once (prints its time), a snapshot every epoch. Separate out_dir, so it never mixes with the real run.
+base: turing.yaml
+
+train:
+  out_dir: runs/turing_test
+  epochs: 2
+  snapshot_every: 1

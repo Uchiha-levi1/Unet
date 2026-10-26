@@ -1,0 +1,5 @@
+# Turing HPC (WPI): 1x L40S (48 GB), batch 16. Data is staged to /tmp by jobs/train_turing.sbatch (--data-root).
+base: default.yaml
+
+train:
+  out_dir: runs/turing

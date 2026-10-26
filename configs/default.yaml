@@ -1,46 +1,65 @@
+# Shared settings for UNet 3+ on the preprocessed A-22 dataset (see exploration/decisions.md).
+# Machine-specific settings live in local.yaml / turing.yaml, which inherit from this file.
 seed: 42
 
 data:
-  root: data                     # contains metadata.csv and tiff/
-  cache_dir: data/cache          # centerline targets + training-set stats
-  crop_size: 512
-  max_white_frac: 0.5            # skip crops where more image pixels than this are pure white
-  centerline_width: 3            # skeleton dilated to ~this many pixels
-  samples_per_epoch: null        # null = one random crop per training image
-  num_workers: 8
+  root: Data                     # preprocessed dataset: index.csv, stats.json, npz/ (override with --data-root)
+  num_workers: 4
+  normalization: imagenet        # imagenet | dataset (mean/std from <root>/stats.json)
+  blur_noise_p: 0.10             # probability of one slight degradation (image only): blur or noise
+  blur_sigma: [0.3, 0.7]         # Gaussian blur sigma range, px
+  noise_std: [2.0, 5.0]          # Gaussian noise std range, grey levels of 255
 
 model:
   encoder: resnet34
   pretrained: true
-  classes: [strap]               # mask head channels (multi-label, sigmoid); e.g. [strap, seal]
+  # Mask head channels (multi-label, sigmoid), in this order. Names must exist in stats.json "channels".
+  classes: [strap, cargo_cover, cord_or_tie, hardware, tape, skid_board, honeycomb, parachute_bag, data_tag, pack_band]
   branch_channels: 64            # each full-scale skip is projected to this; fused width = 5x
   deep_supervision: false
+  deep_supervision_classes: [cargo_cover, parachute_bag, honeycomb, skid_board]  # side heads predict only these
   grad_checkpointing: false
 
 loss:
-  dice: 1.0
-  focal: 1.0
-  cldice: 1.0
-  centerline_bce: 1.0
-  focal_alpha: 0.25              # null disables alpha weighting
+  class_weights:                 # lambda_c, multiplies both Dice and focal of that class
+    strap: 1.0
+    cord_or_tie: 1.0
+    hardware: 1.0
+    pack_band: 0.5
+    tape: 0.5
+    data_tag: 0.5
+    cargo_cover: 0.25
+    parachute_bag: 0.25
+    honeycomb: 0.25
+    skid_board: 0.25
   focal_gamma: 2.0
-  cldice_iters: 5
-  pos_weight_cap: 30.0
+  focal_alpha: null              # null disables alpha weighting
+  cldice:                        # soft clDice per class; the GT skeleton is the stored 1 px centerline `skeleton`
+    strap: {weight: 2.0, iters: 5, skeleton: strap_cl_1px}
+    cord_or_tie: {weight: 2.0, iters: 3, skeleton: cord_cl_1px}
+  centerline_bce: 1.0            # strap centerline head (3 px amodal target)
+  pos_weight_cap: 30.0           # pos_weight = min(neg/pos from stats.json, cap)
 
 train:
   out_dir: runs/default
-  epochs: 60
-  batch_size: 8
+  epochs: 50
+  batch_size: 16                 # per GPU
+  grad_accum: 1                  # optimizer step every N batches (effective batch = batch_size * grad_accum * GPUs)
   lr_encoder: 1.0e-4
   lr_decoder: 1.0e-3             # decoder and heads
-  weight_decay: 1.0e-4
-  warmup_epochs: 2
-  freeze_encoder_epochs: 0
-  amp: true                      # bfloat16 autocast
-  num_vis: 4                     # validation images saved as overlays each epoch
+  min_lr_ratio: 0.01             # cosine ends at this fraction of the base lr
+  weight_decay: 1.0e-2           # not applied to BatchNorm and bias parameters
+  warmup_epochs: 1               # linear warmup per group (encoder: right after it is unfrozen)
+  freeze_encoder_epochs: 1       # encoder weights frozen for the first N epochs
+  freeze_encoder_bn: false       # true: encoder BN in eval mode for the whole run (small batches)
+  grad_clip: 1.0                 # max gradient norm, applied after accumulation
+  amp: true                      # bfloat16 autocast (losses in float32)
+  val_every: 2                   # epochs; the last epoch is always validated
+  val_mode: full                 # full = whole validation split | subset = fixed val_subset_size images
+  val_subset_size: 40
+  snapshot_every: 5              # full checkpoint (resume point) every N epochs; the last epoch is always saved
+  num_vis: 4                     # validation images saved as overlays each validation
 
 eval:
-  tile: 512
-  overlap: 0.25
-  tile_batch: 8
+  batch_size: 16
   threshold: 0.5
