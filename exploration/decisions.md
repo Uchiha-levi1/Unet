@@ -143,5 +143,22 @@
 - **Local GPU:** RTX 5070 Laptop, 8 GB, so at most batch 3.
 - **Data loading:** one npz loads in 17 ms (1 core).
 
+## Status and how to run (2026-10-26)
+- **Done:**
+  - Phases 1–2: `Data/` built, 4800 views; centerline coverage QA is 1.0 for every view.
+  - Phase 3 code: implemented and unit-tested (13/13). It has not run on Turing yet; the Turing test run (step 3) is the first end-to-end run.
+- **All runs happen on Turing. Order:**
+  1. env setup
+  2. `sbatch jobs/overfit_turing.sbatch`
+  3. `CONFIG=configs/turing_test.yaml sbatch -t 01:00:00 jobs/train_turing.sbatch`, then review the `.out` file (epoch time, GPU memory, first validation time → keep `val_mode` full or switch to subset)
+  4. `sbatch jobs/train_turing.sbatch` (resubmit to resume)
+  5. test set, once, with `best.pt`: `python -m src.infer --config configs/turing.yaml --checkpoint runs/turing/best.pt --split test`
+- **Before the first Turing job, check:**
+  - the miniconda module name in both sbatch files
+  - `$REPO/env` exists
+  - pretrained weights are cached in `HF_HOME`
+  - `torch.cuda.is_available()` is true on a GPU node (the cu126 wheel needs NVIDIA driver ≥ 560)
+- **Roads code:** the Massachusetts Roads pipeline was replaced. It remains in git history at commit `972cbc5`.
+
 ## Dropped
 Crossing head and crossing records, physical-strap merge, instance maps and polylines, amodal cord centerline, `defect_expected_region`, depth, camera data, lighting and `background_mode` columns.
