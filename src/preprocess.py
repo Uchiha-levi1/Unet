@@ -1,4 +1,4 @@
-"""Preprocess the Blender A-22 dataset (dataset_main/) into training targets. See exploration/decisions.md.
+"""Preprocess the Blender A-22 dataset (dataset_main/) into training targets. See exploration/run1/decisions.md.
 
 Reads dataset_main/ without modifying it and writes, per view:
   <out>/npz/<sample_id>.npz   image (768,768,3) uint8, mask (10,768,768) uint8 0/1,

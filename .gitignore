@@ -2,6 +2,7 @@
 runs/
 data/
 Data/
+Data_v1/
 dataset_main/
 __pycache__/
 *.zip

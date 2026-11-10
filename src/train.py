@@ -71,9 +71,10 @@ def lr_factor(step, start, warmup, total, min_ratio):
 
 def build_scheduler(optimizer, train_cfg, steps_per_epoch):
     """Per-group schedule, stepped per optimizer step: the decoder warms up from step 0; the encoder stays at 0
-    while frozen and warms up right after it is unfrozen. Both decay to min_lr_ratio at the last step."""
+    while frozen and warms up right after it is unfrozen. Both decay to min_lr_ratio at the last step.
+    warmup_epochs may be fractional (e.g. 0.3); it is rounded to whole steps."""
     total = train_cfg["epochs"] * steps_per_epoch
-    warmup = train_cfg["warmup_epochs"] * steps_per_epoch
+    warmup = max(1, round(train_cfg["warmup_epochs"] * steps_per_epoch))
     enc_start = train_cfg["freeze_encoder_epochs"] * steps_per_epoch
     fns = [lambda s, start=(enc_start if g["encoder"] else 0):
            lr_factor(s, start, warmup, total, train_cfg["min_lr_ratio"]) for g in optimizer.param_groups]
@@ -85,9 +86,16 @@ def set_encoder_trainable(model, trainable):
         p.requires_grad_(trainable)
 
 
-def latest_snapshot(out_dir):
-    snaps = sorted(Path(out_dir).glob("epoch_*.pt"))
+def latest_snapshot(snap_dir):
+    snaps = sorted(Path(snap_dir).glob("epoch_*.pt"))
     return snaps[-1] if snaps else None
+
+
+def load_init_weights(net, path):
+    """Initialize model weights from a checkpoint (best.pt or a snapshot): weights only, no optimizer/schedule."""
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    net.load_state_dict(state["model"])
+    return state.get("epoch")
 
 
 def save_snapshot(path, model, optimizer, scheduler, epoch, best):
@@ -109,16 +117,28 @@ def restore_rng(rng):
         torch.cuda.set_rng_state_all(rng["cuda"])
 
 
+def steps_per_epoch(loader, train_cfg):
+    """Optimizer steps per epoch: an incomplete last accumulation group is dropped; optionally capped
+    (train.max_steps_per_epoch, for smoke tests)."""
+    n = len(loader) // train_cfg["grad_accum"]
+    cap = train_cfg.get("max_steps_per_epoch")
+    return min(n, cap) if cap else n
+
+
 def train_one_epoch(model, loader, criterion, optimizer, scheduler, train_cfg, device, mean, std):
     model.train()  # also re-freezes encoder BN stats if enabled (see UNet3Plus.train)
     accum, clip = train_cfg["grad_accum"], train_cfg["grad_clip"]
-    n_steps = len(loader) // accum  # an incomplete last accumulation group is dropped
+    n_steps = steps_per_epoch(loader, train_cfg)
     params = list(model.parameters())
     sums, grad_norms = {}, []
+    data_wait = 0.0  # time the main process waits for the loader (GPU work is async, so this is the stall)
     batches = iter(loader)
     for _ in range(n_steps):
         for micro in range(accum):
-            image, targets = gpu_inputs(next(batches), device, mean, std)
+            t0 = time.perf_counter()
+            batch = next(batches)
+            data_wait += time.perf_counter() - t0
+            image, targets = gpu_inputs(batch, device, mean, std)
             # DDP: skip the gradient all-reduce on all but the last micro-batch of an accumulation group.
             sync = nullcontext() if micro == accum - 1 or not isinstance(model, DDP) else model.no_sync()
             with sync:
@@ -136,6 +156,7 @@ def train_one_epoch(model, loader, criterion, optimizer, scheduler, train_cfg, d
     out = {k: float(v) / n_steps for k, v in sums.items()}
     out["grad_norm"] = float(norms.mean())          # before clipping
     out["grad_clipped_frac"] = float((norms > clip).float().mean())
+    out["data_wait_s"] = data_wait
     return out
 
 
@@ -143,6 +164,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True)
     ap.add_argument("--data-root", default=None, help="override data.root (e.g. data staged on node-local /tmp)")
+    ap.add_argument("--init-checkpoint", default=None,
+                    help="initialize model weights from this checkpoint (fine-tuning); ignored when resuming")
     args = ap.parse_args()
     cfg = load_config(args.config)
     if args.data_root:
@@ -157,8 +180,9 @@ def main():
     torch.backends.cudnn.benchmark = True
 
     out_dir = Path(tcfg["out_dir"])
+    snap_dir = out_dir / tcfg["snapshot_subdir"] if tcfg.get("snapshot_subdir") else out_dir
     if main_proc:
-        out_dir.mkdir(parents=True, exist_ok=True)
+        snap_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
     stats = load_stats(dcfg["root"])
@@ -180,13 +204,17 @@ def main():
     side = mcfg["deep_supervision_classes"] if mcfg["deep_supervision"] else ()
     criterion = SegLoss(lcfg, mcfg["classes"], pos_weight, side).to(device)
     optimizer = build_optimizer(net, tcfg)
-    steps_per_epoch = len(loader) // tcfg["grad_accum"]
-    scheduler = build_scheduler(optimizer, tcfg, steps_per_epoch)
+    n_steps = steps_per_epoch(loader, tcfg)
+    scheduler = build_scheduler(optimizer, tcfg, n_steps)
     enc_group, dec_group = (next(i for i, g in enumerate(optimizer.param_groups) if g["encoder"] == e)
                             for e in (True, False))
 
     start_epoch, best = 1, -1.0
-    snap = latest_snapshot(out_dir)
+    snap = latest_snapshot(snap_dir)
+    if snap is None and args.init_checkpoint:
+        init_epoch = load_init_weights(net, args.init_checkpoint)
+        if main_proc:
+            print(f"initialized weights from {args.init_checkpoint} (epoch {init_epoch})", flush=True)
     if snap is not None:
         state = torch.load(snap, map_location="cpu", weights_only=False)  # own file: includes RNG states
         net.load_state_dict(state["model"])
@@ -197,7 +225,7 @@ def main():
         if main_proc:
             print(f"resumed from {snap} (epoch {state['epoch']}, best strap dice {best:.4f})", flush=True)
     if main_proc:
-        print(f"{len(train_set)} train views, {steps_per_epoch} optimizer steps/epoch, "
+        print(f"{len(train_set)} train views, {n_steps} optimizer steps/epoch, "
               f"{len(val_set)} validation views ({tcfg['val_mode']}), pos_weight {pos_weight:.1f}", flush=True)
 
     writer = SummaryWriter(out_dir / "tb") if main_proc else None
@@ -254,15 +282,18 @@ def main():
             msg = (f"epoch {epoch:3d} | loss {row['train/total']:.4f} (strap dice {row['train/dice/strap']:.3f}"
                    f" cldice {row.get('train/cldice/strap', 0):.3f} cl_bce {row['train/centerline_bce']:.3f})"
                    f" | grad {row['train/grad_norm']:.2f} clip {row['train/grad_clipped_frac']:.0%}"
-                   f" | {row['time_train_s']:.0f}s {row['gpu_mem_peak_gb']:.1f}GB")
+                   f" | {row['time_train_s']:.0f}s (data wait {row['train/data_wait_s']:.0f}s)"
+                   f" {row['gpu_mem_peak_gb']:.1f}GB")
             if "val/dice/strap" in row:
                 msg += (f" | val strap dice {row['val/dice/strap']:.4f} cldice {row['val/cldice/strap']:.4f}"
+                        f" tprec {row['val/tprec/strap']:.3f}"
                         f" cov {row['val/strap_cl_coverage']:.3f} cc {row['val/cc_pred']:.0f}/{row['val/cc_gt']:.0f}"
-                        f" cord dice {row['val/dice/cord_or_tie']:.3f} hw dice {row['val/dice/hardware']:.3f}"
+                        f" cord dice {row['val/dice/cord_or_tie']:.3f} tprec {row['val/tprec/cord_or_tie']:.3f}"
+                        f" hw dice {row['val/dice/hardware']:.3f}"
                         f" ({row['time_val_s']:.0f}s){' *' if validated else ''}")
             print(msg, flush=True)
             if epoch % tcfg["snapshot_every"] == 0 or epoch == tcfg["epochs"]:
-                save_snapshot(out_dir / f"epoch_{epoch:03d}.pt", net, optimizer, scheduler, epoch, best)
+                save_snapshot(snap_dir / f"epoch_{epoch:03d}.pt", net, optimizer, scheduler, epoch, best)
 
     if main_proc:
         writer.close()

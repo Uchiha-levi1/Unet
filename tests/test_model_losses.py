@@ -5,7 +5,7 @@ import torch
 
 from src.losses import SegLoss, focal_loss, soft_cldice_loss, soft_dice_loss
 from src.model import UNet3Plus
-from src.train import lr_factor
+from src.train import build_optimizer, build_scheduler, load_init_weights, lr_factor, steps_per_epoch
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SIZE = 768
@@ -128,3 +128,37 @@ def test_lr_schedule_freeze_warmup_cosine():
     assert dec[0] == pytest.approx(0.1) and dec[spe - 1] == pytest.approx(1.0)        # decoder warmup in epoch 1
     assert all(a >= b for a, b in zip(dec[spe:], dec[spe + 1:]))  # cosine: non-increasing
     assert dec[-1] == pytest.approx(0.01, abs=5e-3) and enc[-1] == pytest.approx(0.01, abs=5e-3)
+
+
+TRAIN_CFG = {"epochs": 2, "lr_encoder": 3e-5, "lr_decoder": 3e-4, "min_lr_ratio": 0.01, "weight_decay": 1e-2,
+             "warmup_epochs": 0.3, "freeze_encoder_epochs": 0, "grad_accum": 1}
+
+
+def test_fractional_warmup_no_freeze():
+    """warmup_epochs 0.3 of 50 steps -> 15 warmup steps; no freeze: both groups warm up from step 0, lr never > base."""
+    model = UNet3Plus(pretrained=False)
+    opt = build_optimizer(model, TRAIN_CFG)
+    sched = build_scheduler(opt, TRAIN_CFG, steps_per_epoch=50)
+    factors = []
+    for _ in range(100):
+        factors.append(sched.get_last_lr()[0] / opt.param_groups[0]["initial_lr"])
+        opt.step()
+        sched.step()
+    assert factors[0] == pytest.approx(1 / 15) and factors[14] == pytest.approx(1.0)
+    assert max(factors) <= 1.0 + 1e-9
+    assert all(g["lr"] > 0 for g in opt.param_groups)  # encoder is not frozen
+
+
+def test_steps_per_epoch_cap():
+    loader = list(range(1752))
+    assert steps_per_epoch(loader, {"grad_accum": 1}) == 1752
+    assert steps_per_epoch(loader, {"grad_accum": 8}) == 219
+    assert steps_per_epoch(loader, {"grad_accum": 1, "max_steps_per_epoch": 50}) == 50
+
+
+def test_init_checkpoint_loads_weights(tmp_path):
+    src = UNet3Plus(pretrained=False, num_classes=10)
+    torch.save({"model": src.state_dict(), "epoch": 42, "val": {}}, tmp_path / "best.pt")  # best.pt format
+    dst = UNet3Plus(pretrained=False, num_classes=10)
+    assert load_init_weights(dst, tmp_path / "best.pt") == 42
+    assert all(torch.equal(a, b) for a, b in zip(src.state_dict().values(), dst.state_dict().values()))

@@ -1,4 +1,4 @@
-# Shared settings for UNet 3+ on the preprocessed A-22 dataset (see exploration/decisions.md).
+# Shared settings for UNet 3+ on the preprocessed A-22 dataset (see exploration/run1/decisions.md).
 # Machine-specific settings live in local.yaml / turing.yaml, which inherit from this file.
 seed: 42
 

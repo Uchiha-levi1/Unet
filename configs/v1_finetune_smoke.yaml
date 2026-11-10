@@ -1,0 +1,12 @@
+# Smoke test of the run 2 setup: 2 short epochs (50 steps each), 100-view validation and a snapshot every epoch.
+# Separate out_dir, so it never mixes with the real run.
+base: v1_finetune.yaml
+
+train:
+  out_dir: runs/v1_finetune_smoke
+  epochs: 2
+  max_steps_per_epoch: 50
+  val_every: 1
+  val_mode: subset
+  val_subset_size: 100
+  snapshot_every: 1
