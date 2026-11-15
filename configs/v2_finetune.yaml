@@ -1,0 +1,9 @@
+# Run 3 (r2): same as r1 (v1_finetune.yaml: fine-tune from runs/turing/best.pt) but on Data_v2 (34 background photos).
+# See exploration/run3/changes.md. Submit with INIT=runs/turing/best.pt (jobs/train_turing.sbatch).
+base: v1_finetune.yaml
+
+data:
+  root: Data_v2
+
+train:
+  out_dir: runs/v2_finetune
