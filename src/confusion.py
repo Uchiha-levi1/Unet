@@ -27,8 +27,10 @@ PRIORITY = ["hardware", "cord_or_tie", "tape", "data_tag", "pack_band", "strap",
 @torch.no_grad()
 def confusion(model, dataset, cfg, amp=True):
     classes = cfg["model"]["classes"]
-    labels = ["background"] + PRIORITY
-    order = torch.tensor([classes.index(c) for c in PRIORITY])  # channel index for each priority label
+    # Multi-label data: PRIORITY order. Single-label data (Data_v3): any order works; use the config's.
+    prio = PRIORITY if set(PRIORITY) == set(classes) else list(classes)
+    labels = ["background"] + prio
+    order = torch.tensor([classes.index(c) for c in prio])  # channel index for each priority label
     n = len(labels)
     device = next(model.parameters()).device
     mean, std = normalization(cfg["data"])
@@ -48,7 +50,10 @@ def confusion(model, dataset, cfg, amp=True):
         # Pred: most probable channel above threshold.
         p = torch.where(prob > thr, prob, torch.zeros_like(prob))
         pred_lab = torch.where(p.amax(1) > 0, p.argmax(1) + 1, torch.zeros_like(gt_lab))
-        cm += torch.bincount((gt_lab * n + pred_lab).flatten(), minlength=n * n)
+        idx = (gt_lab * n + pred_lab).flatten()
+        if "ignore" in batch:  # e.g. data_tag pixels: left out of the matrix
+            idx = idx[~batch["ignore"].to(device)[:, 0].bool().flatten()]
+        cm += torch.bincount(idx, minlength=n * n)
     return labels, cm.view(n, n).cpu().numpy()
 
 

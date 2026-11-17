@@ -16,6 +16,7 @@ import torch
 from src import preprocess as P
 from src.config import load_config
 from src.data import normalization
+from src import preprocess_v3 as V3
 from src.model import build_model
 
 
@@ -30,7 +31,8 @@ def main():
     cfg = load_config(args.config)
     cfg["model"]["pretrained"] = False
     classes = cfg["model"]["classes"]
-    assert classes == P.CHANNELS, "overlay colors assume the preprocessing channel order"
+    v3 = classes == V3.CHANNELS  # Data_v3 model: 8 classes, centerline channels = webbing, cord
+    assert v3 or classes == P.CHANNELS, "overlay colors assume a preprocessing channel order"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = build_model(cfg["model"]).to(device).eval()
     state = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
@@ -44,15 +46,23 @@ def main():
         x = ((torch.from_numpy(rgb).permute(2, 0, 1)[None].float() / 255 - mean) / std).to(device)
         out = model(x)
         prob = torch.sigmoid(out["mask"])[0].cpu().numpy()
-        cl = torch.sigmoid(out["centerline"])[0, 0].cpu().numpy()
+        cls = torch.sigmoid(out["centerline"])[0].cpu().numpy()
+        cl = cls[0]
         mask = (prob > thr).astype(np.uint8)
-        vis = P.overlay(rgb, mask, (cl > thr).astype(np.uint8), np.zeros_like(mask[0]))
+        if v3:
+            vis = V3.overlay(rgb, mask, (cls[0] > thr).astype(np.uint8), (cls[1] > thr).astype(np.uint8))
+        else:
+            vis = P.overlay(rgb, mask, (cl > thr).astype(np.uint8), np.zeros_like(mask[0]))
         cv2.imwrite(str(args.out / f"{path.stem}_overlay.png"), vis[..., ::-1])
         d = args.out / path.stem
         d.mkdir(exist_ok=True)
         for c, p in zip(classes, prob):
             cv2.imwrite(str(d / f"{c}.png"), (p * 255).astype(np.uint8))
-        cv2.imwrite(str(d / "centerline.png"), (cl * 255).astype(np.uint8))
+        if v3:
+            for k, c in zip(cfg["model"]["centerlines"], cls):
+                cv2.imwrite(str(d / f"{k}.png"), (c * 255).astype(np.uint8))
+        else:
+            cv2.imwrite(str(d / "centerline.png"), (cl * 255).astype(np.uint8))
         print(path.name, " ".join(f"{c}={100 * m.mean():.1f}%" for c, m in zip(classes, mask)), flush=True)
 
 

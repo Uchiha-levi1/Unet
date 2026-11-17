@@ -1,0 +1,39 @@
+# Run 4 (r3): fine-tune r2 (runs/v2_finetune/best.pt) on Data_v3 (single_a22_physical_v13: single A-22,
+# single label per pixel, MS COCO backgrounds). Same optimization as r1/r2 (v1_finetune.yaml).
+# Submit with INIT=runs/v2_finetune/best.pt DATA=Data_v3 and --mem=64G (jobs/train_turing.sbatch).
+base: v2_finetune.yaml
+
+data:
+  root: Data_v3
+  line_keys: [webbing_cl_1px, webbing_cl_3px, cord_cl_1px, cord_cl_3px]
+  ignore_key: data_tag             # data_tag pixels: left out of every loss term and metric
+
+model:
+  classes: [webbing, cargo_cover, cord_or_tie, attachment_hardware, tape, skid_board, honeycomb, parachute_bag]
+  centerlines: [webbing_cl_3px, cord_cl_3px]   # centerline head channels (BCE targets)
+  primary_class: webbing           # best.pt selection, connectivity, overlays
+
+loss:
+  class_weights:                   # same values as r1/r2 (old strap / hardware -> webbing / attachment_hardware)
+    webbing: 1.0
+    cord_or_tie: 1.5
+    attachment_hardware: 1.0
+    tape: 0.5
+    cargo_cover: 0.25
+    parachute_bag: 0.25
+    honeycomb: 0.25
+    skid_board: 0.25
+  cldice:                          # inherited strap entry is skipped (class not in this model)
+    webbing: {weight: 2.0, iters: 5, skeleton: webbing_cl_1px}
+    cord_or_tie: {weight: 2.0, iters: 3, skeleton: cord_cl_1px}
+  consistency:                     # share of predicted centerline outside the predicted support classes
+    weight: 0.5
+    support: [webbing, cord_or_tie, tape, attachment_hardware]
+
+train:
+  out_dir: runs/v3_finetune
+  init_head_map:                   # r2 checkpoint heads -> this model's heads (cord centerline starts fresh)
+    classes: [strap, cargo_cover, cord_or_tie, hardware, tape, skid_board, honeycomb, parachute_bag, data_tag, pack_band]
+    mask: {webbing: strap, cargo_cover: cargo_cover, cord_or_tie: cord_or_tie, attachment_hardware: hardware,
+           tape: tape, skid_board: skid_board, honeycomb: honeycomb, parachute_bag: parachute_bag}
+    centerline: {0: 0}             # webbing centerline <- strap centerline

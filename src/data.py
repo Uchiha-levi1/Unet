@@ -67,6 +67,8 @@ class A22Dataset(Dataset):
             self.index = self.index.loc[subset_ids(self.index, subset, cfg["seed"])].reset_index(drop=True)
         channels = load_stats(self.root)["channels"]
         self.channel_idx = [channels.index(c) for c in cfg["model"]["classes"]]
+        self.line_keys = tuple(cfg["data"].get("line_keys", LINE_KEYS))
+        self.ignore_key = cfg["data"].get("ignore_key")  # npz map whose 1-pixels are left out of loss/metrics
         self.train = train
 
     def __len__(self):
@@ -77,7 +79,9 @@ class A22Dataset(Dataset):
         with np.load(self.root / row["npz_path"]) as z:
             image = z["image"]
             mask = z["mask"][self.channel_idx]
-            lines = {k: z[k] for k in LINE_KEYS}
+            lines = {k: z[k] for k in self.line_keys}
+            if self.ignore_key:
+                lines["ignore"] = z[self.ignore_key]
         if self.train:
             rng = np.random.default_rng(torch.randint(0, 2**31, ()).item())  # follows the seeded torch RNG
             image = degrade(image, self.data_cfg, rng)
@@ -95,7 +99,8 @@ def gpu_inputs(batch, device, mean, std, with_targets=True):
     image = ((image - m) / s).contiguous(memory_format=torch.channels_last)
     if not with_targets:
         return image, None
-    targets = {k: batch[k].to(device, non_blocking=True).float() for k in ("mask", *LINE_KEYS)}
+    keys = [k for k in batch if k not in ("image", "sample_id")]  # mask, centerline maps, optional ignore
+    targets = {k: batch[k].to(device, non_blocking=True).float() for k in keys}
     return image, targets
 
 

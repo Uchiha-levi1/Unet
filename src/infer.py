@@ -14,11 +14,11 @@ from torch.utils.data import DataLoader
 from src.config import load_config
 from src.data import A22Dataset, gpu_inputs, normalization
 from src.metrics import average, image_metrics
-from src.model import build_model
+from src.model import build_model, centerline_targets, primary_class
 
 
 def overlay(raw, gt, pred, centerline):
-    """One row: image | strap GT | strap prediction (green = TP, red = FP, blue = FN) | centerline prob."""
+    """One row: image | primary-class GT | primary-class prediction (green = TP, red = FP, blue = FN) | centerline prob."""
     gt3 = np.repeat(gt[..., None] * 255, 3, -1).astype(np.uint8)
     err = raw.copy() // 2
     err[pred & gt] = (0, 255, 0)
@@ -35,8 +35,11 @@ def evaluate(model, dataset, cfg, amp=True, vis_dir=None, num_vis=0, save_pred_d
     model.eval()
     device = next(model.parameters()).device
     classes = cfg["model"]["classes"]
-    skel_keys = {c: v["skeleton"] for c, v in cfg["loss"]["cldice"].items()}  # GT skeletons for hard clDice
-    strap = classes.index("strap")
+    skel_keys = {c: v["skeleton"] for c, v in cfg["loss"]["cldice"].items()  # GT skeletons for hard clDice
+                 if c in classes}  # inherited entries for classes this model does not have are skipped
+    primary = primary_class(cfg["model"])
+    strap = classes.index(primary)
+    cl_names = centerline_targets(cfg["model"])
     mean, std = normalization(cfg["data"])
     loader = DataLoader(dataset, batch_size=cfg["eval"]["batch_size"], num_workers=cfg["data"]["num_workers"],
                         pin_memory=True)
@@ -46,11 +49,14 @@ def evaluate(model, dataset, cfg, amp=True, vis_dir=None, num_vis=0, save_pred_d
         with torch.autocast("cuda", dtype=torch.bfloat16, enabled=amp and image.is_cuda):
             out = model(image)
         prob = torch.sigmoid(out["mask"].float()).cpu().numpy()
-        cl_prob = torch.sigmoid(out["centerline"].float())[:, 0].cpu().numpy()
+        cl_all = torch.sigmoid(out["centerline"].float()).cpu().numpy()  # (B, n_centerlines, H, W)
+        cl_prob = cl_all[:, 0]
         pred, gt = prob > cfg["eval"]["threshold"], batch["mask"].numpy().astype(bool)
         skels = {c: batch[k][:, 0].numpy().astype(bool) for c, k in skel_keys.items()}
+        ignore = batch["ignore"][:, 0].numpy().astype(bool) if "ignore" in batch else None
         for i, sid in enumerate(batch["sample_id"]):
-            m = image_metrics(pred[i], gt[i], classes, {c: s[i] for c, s in skels.items()})
+            m = image_metrics(pred[i], gt[i], classes, {c: s[i] for c, s in skels.items()}, primary,
+                              None if ignore is None else ignore[i])
             m["sample_id"] = sid
             results.append(m)
             if vis_dir is not None and seen < num_vis:
@@ -63,7 +69,11 @@ def evaluate(model, dataset, cfg, amp=True, vis_dir=None, num_vis=0, save_pred_d
                 d.mkdir(parents=True, exist_ok=True)
                 for c, p in zip(classes, prob[i]):
                     cv2.imwrite(str(d / f"{c}.png"), (p * 255).astype(np.uint8))
-                cv2.imwrite(str(d / "centerline.png"), (cl_prob[i] * 255).astype(np.uint8))
+                if len(cl_names) == 1:
+                    cv2.imwrite(str(d / "centerline.png"), (cl_prob[i] * 255).astype(np.uint8))
+                else:
+                    for k, c in zip(cl_names, cl_all[i]):
+                        cv2.imwrite(str(d / f"{k}.png"), (c * 255).astype(np.uint8))
             seen += 1
     summary = average([{k: v for k, v in r.items() if k != "sample_id"} for r in results])
     return summary, results

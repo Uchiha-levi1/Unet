@@ -25,7 +25,7 @@ from src.config import load_config
 from src.data import A22Dataset, gpu_inputs, load_stats, normalization, seed_worker
 from src.infer import evaluate
 from src.losses import SegLoss
-from src.model import build_model
+from src.model import build_model, centerline_targets, primary_class
 
 
 def set_seed(seed):
@@ -91,10 +91,28 @@ def latest_snapshot(snap_dir):
     return snaps[-1] if snaps else None
 
 
-def load_init_weights(net, path):
-    """Initialize model weights from a checkpoint (best.pt or a snapshot): weights only, no optimizer/schedule."""
+def load_init_weights(net, path, head_map=None, classes=None):
+    """Initialize model weights from a checkpoint (best.pt or a snapshot): weights only, no optimizer/schedule.
+
+    head_map (fine-tuning onto a different class set): {"classes": checkpoint's mask channels in order,
+    "mask": {new class: checkpoint class}, "centerline": {new channel: checkpoint channel}}. All other weights
+    must match exactly; head channels without a mapping keep their fresh initialization."""
     state = torch.load(path, map_location="cpu", weights_only=False)
-    net.load_state_dict(state["model"])
+    if head_map is None:
+        net.load_state_dict(state["model"])
+        return state.get("epoch")
+    src = dict(state["model"])
+    own = net.state_dict()
+    heads = {"mask_head": [(classes.index(n), head_map["classes"].index(o)) for n, o in head_map["mask"].items()],
+             "centerline_head": [(int(n), int(o)) for n, o in head_map.get("centerline", {}).items()]}
+    for head, pairs in heads.items():
+        for p in ("weight", "bias"):
+            k = f"{head}.{p}"
+            new = own[k].clone()
+            for n, o in pairs:
+                new[n] = src[k][o]
+            src[k] = new
+    net.load_state_dict(src)  # strict: everything except the remapped heads must match
     return state.get("epoch")
 
 
@@ -186,7 +204,11 @@ def main():
         (out_dir / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
 
     stats = load_stats(dcfg["root"])
-    pos_weight = min(stats["centerline_neg_over_pos"], lcfg["pos_weight_cap"])
+    cl_keys = centerline_targets(mcfg)
+    primary = primary_class(mcfg)
+    nop = stats["centerline_neg_over_pos"]  # a number (one centerline) or {npz key: value} (Data_v3)
+    pos_weight = ([min(nop[k], lcfg["pos_weight_cap"]) for k in cl_keys] if isinstance(nop, dict)
+                  else min(nop, lcfg["pos_weight_cap"]))
     mean, std = normalization(dcfg)
 
     train_set = A22Dataset(cfg, "train", train=True)
@@ -202,7 +224,7 @@ def main():
     net = build_model(mcfg).to(device).to(memory_format=torch.channels_last)  # ~30% faster convs under AMP
     net.freeze_encoder_bn = tcfg["freeze_encoder_bn"]
     side = mcfg["deep_supervision_classes"] if mcfg["deep_supervision"] else ()
-    criterion = SegLoss(lcfg, mcfg["classes"], pos_weight, side).to(device)
+    criterion = SegLoss(lcfg, mcfg["classes"], pos_weight, side, centerline_targets=cl_keys).to(device)
     optimizer = build_optimizer(net, tcfg)
     n_steps = steps_per_epoch(loader, tcfg)
     scheduler = build_scheduler(optimizer, tcfg, n_steps)
@@ -212,7 +234,7 @@ def main():
     start_epoch, best = 1, -1.0
     snap = latest_snapshot(snap_dir)
     if snap is None and args.init_checkpoint:
-        init_epoch = load_init_weights(net, args.init_checkpoint)
+        init_epoch = load_init_weights(net, args.init_checkpoint, tcfg.get("init_head_map"), mcfg["classes"])
         if main_proc:
             print(f"initialized weights from {args.init_checkpoint} (epoch {init_epoch})", flush=True)
     if snap is not None:
@@ -223,10 +245,10 @@ def main():
         restore_rng(state["rng"])
         start_epoch, best = state["epoch"] + 1, state["best"]
         if main_proc:
-            print(f"resumed from {snap} (epoch {state['epoch']}, best strap dice {best:.4f})", flush=True)
+            print(f"resumed from {snap} (epoch {state['epoch']}, best {primary} dice {best:.4f})", flush=True)
     if main_proc:
         print(f"{len(train_set)} train views, {n_steps} optimizer steps/epoch, "
-              f"{len(val_set)} validation views ({tcfg['val_mode']}), pos_weight {pos_weight:.1f}", flush=True)
+              f"{len(val_set)} validation views ({tcfg['val_mode']}), pos_weight {pos_weight}", flush=True)
 
     writer = SummaryWriter(out_dir / "tb") if main_proc else None
     log_path = out_dir / "log.csv"
@@ -265,9 +287,9 @@ def main():
                       flush=True)
                 first_val = False
             row.update({f"val/{k}": v for k, v in val.items()})
-            validated = val["dice/strap"] > best
+            validated = val[f"dice/{primary}"] > best
             if validated:
-                best = val["dice/strap"]
+                best = val[f"dice/{primary}"]
                 torch.save({"model": net.state_dict(), "epoch": epoch, "val": val}, out_dir / "best.pt")
         if world > 1:
             dist.barrier()  # other ranks wait while rank 0 validates
@@ -279,17 +301,21 @@ def main():
             writer.flush()
             rows.append(row)
             pd.DataFrame(rows).to_csv(log_path, index=False)
-            msg = (f"epoch {epoch:3d} | loss {row['train/total']:.4f} (strap dice {row['train/dice/strap']:.3f}"
-                   f" cldice {row.get('train/cldice/strap', 0):.3f} cl_bce {row['train/centerline_bce']:.3f})"
+            P, cord = primary, "cord_or_tie"
+            hw = "hardware" if "hardware" in mcfg["classes"] else "attachment_hardware"
+            cons = sum(v for k, v in row.items() if k.startswith("train/consistency/"))
+            msg = (f"epoch {epoch:3d} | loss {row['train/total']:.4f} ({P} dice {row[f'train/dice/{P}']:.3f}"
+                   f" cldice {row.get(f'train/cldice/{P}', 0):.3f} cl_bce {row['train/centerline_bce']:.3f}"
+                   + (f" cons {cons:.3f}" if criterion.cons_idx else "") + ")"
                    f" | grad {row['train/grad_norm']:.2f} clip {row['train/grad_clipped_frac']:.0%}"
                    f" | {row['time_train_s']:.0f}s (data wait {row['train/data_wait_s']:.0f}s)"
                    f" {row['gpu_mem_peak_gb']:.1f}GB")
-            if "val/dice/strap" in row:
-                msg += (f" | val strap dice {row['val/dice/strap']:.4f} cldice {row['val/cldice/strap']:.4f}"
-                        f" tprec {row['val/tprec/strap']:.3f}"
-                        f" cov {row['val/strap_cl_coverage']:.3f} cc {row['val/cc_pred']:.0f}/{row['val/cc_gt']:.0f}"
-                        f" cord dice {row['val/dice/cord_or_tie']:.3f} tprec {row['val/tprec/cord_or_tie']:.3f}"
-                        f" hw dice {row['val/dice/hardware']:.3f}"
+            if f"val/dice/{P}" in row:
+                msg += (f" | val {P} dice {row[f'val/dice/{P}']:.4f} cldice {row[f'val/cldice/{P}']:.4f}"
+                        f" tprec {row[f'val/tprec/{P}']:.3f}"
+                        f" cov {row[f'val/{P}_cl_coverage']:.3f} cc {row['val/cc_pred']:.0f}/{row['val/cc_gt']:.0f}"
+                        f" cord dice {row[f'val/dice/{cord}']:.3f} tprec {row[f'val/tprec/{cord}']:.3f}"
+                        f" hw dice {row[f'val/dice/{hw}']:.3f}"
                         f" ({row['time_val_s']:.0f}s){' *' if validated else ''}")
             print(msg, flush=True)
             if epoch % tcfg["snapshot_every"] == 0 or epoch == tcfg["epochs"]:

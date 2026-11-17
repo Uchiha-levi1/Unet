@@ -31,20 +31,24 @@ def num_components(mask):
     return int(label(mask, connectivity=2).max())  # 8-connectivity
 
 
-def image_metrics(pred, gt, classes, skels):
-    """pred, gt: (C,H,W) bool in `classes` order; skels: {class: GT skeleton (H,W) bool} for clDice classes."""
+def image_metrics(pred, gt, classes, skels, primary="strap", ignore=None):
+    """pred, gt: (C,H,W) bool in `classes` order; skels: {class: GT skeleton (H,W) bool} for clDice classes.
+    primary: class for connectivity / centerline coverage. ignore: (H,W) bool, pixels left out of all metrics."""
+    if ignore is not None:
+        pred, gt = pred & ~ignore, gt & ~ignore
+        skels = {c: s & ~ignore for c, s in skels.items()}
     m = {}
     for i, c in enumerate(classes):
         m[f"dice/{c}"], m[f"iou/{c}"] = dice_iou(pred[i], gt[i])
     for c, skel in skels.items():
         i = classes.index(c)
         m[f"cldice/{c}"], m[f"tprec/{c}"], m[f"tsens/{c}"] = hard_cldice(pred[i], gt[i], skel)
-    if "strap" in classes:
-        i = classes.index("strap")
+    if primary in classes:
+        i = classes.index(primary)
         m["cc_pred"], m["cc_gt"] = num_components(pred[i]), num_components(gt[i])
         m["cc_abs_diff"] = abs(m["cc_pred"] - m["cc_gt"])
-        if "strap" in skels:
-            m["strap_cl_coverage"] = m["tsens/strap"]
+        if primary in skels:
+            m[f"{primary}_cl_coverage"] = m[f"tsens/{primary}"]
     return {k: float(v) for k, v in m.items()}
 
 

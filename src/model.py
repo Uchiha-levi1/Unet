@@ -47,7 +47,7 @@ class FullScaleDecoderLevel(nn.Module):
 
 class UNet3Plus(nn.Module):
     def __init__(self, encoder="resnet34", pretrained=True, num_classes=1, branch_channels=64,
-                 deep_supervision=False, num_side_classes=None, grad_checkpointing=False):
+                 deep_supervision=False, num_side_classes=None, grad_checkpointing=False, num_centerlines=1):
         super().__init__()
         self.encoder = timm.create_model(encoder, pretrained=pretrained, features_only=True)
         enc_ch = self.encoder.feature_info.channels()
@@ -59,7 +59,7 @@ class UNet3Plus(nn.Module):
 
         # Heads on D1 (stride 2): 3x3 conv to logits, then bilinear upsample to input size.
         self.mask_head = nn.Conv2d(fused, num_classes, 3, padding=1)
-        self.centerline_head = nn.Conv2d(fused, 1, 3, padding=1)
+        self.centerline_head = nn.Conv2d(fused, num_centerlines, 3, padding=1)  # one channel per centerline target
 
         self.deep_supervision = deep_supervision
         if deep_supervision:  # side mask heads on D2..D5, predicting a subset of classes (large ones)
@@ -105,4 +105,15 @@ def build_model(model_cfg):
                      num_classes=len(model_cfg["classes"]), branch_channels=model_cfg["branch_channels"],
                      deep_supervision=model_cfg["deep_supervision"],
                      num_side_classes=len(model_cfg["deep_supervision_classes"]),
-                     grad_checkpointing=model_cfg["grad_checkpointing"])
+                     grad_checkpointing=model_cfg["grad_checkpointing"],
+                     num_centerlines=len(centerline_targets(model_cfg)))
+
+
+def centerline_targets(model_cfg):
+    """npz keys the centerline head channels are trained on (default: the single strap centerline)."""
+    return list(model_cfg.get("centerlines", ["strap_cl_3px"]))
+
+
+def primary_class(model_cfg):
+    """Class used for best.pt selection, connectivity metrics and overlays (default: strap)."""
+    return model_cfg.get("primary_class", "strap")
