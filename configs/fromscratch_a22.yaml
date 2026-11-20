@@ -1,0 +1,15 @@
+# From scratch on Data_v3: same data / classes / losses / validation as v3_finetune.yaml (r3), but no INIT: the
+# encoder starts from timm's ImageNet weights, decoder and heads are random. Run 1's from-scratch optimization.
+# Submit WITHOUT INIT: CONFIG=configs/fromscratch_a22.yaml DATA=Data_v3 sbatch -t 24:00:00 --mem=64G jobs/train_turing.sbatch
+base: v3_finetune.yaml
+
+model:
+  pretrained: true                 # timm ImageNet ResNet-34 (from HF_HOME cache)
+
+train:
+  out_dir: runs/fromscratch_a22
+  epochs: 30                       # ~26 min/epoch + validation
+  lr_encoder: 1.0e-4               # run 1 values
+  lr_decoder: 1.0e-3
+  freeze_encoder_epochs: 1         # random decoder must not disturb the ImageNet encoder in epoch 1
+  warmup_epochs: 1                 # per group; encoder warms up after it is unfrozen

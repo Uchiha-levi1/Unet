@@ -46,7 +46,29 @@ Run 3 records are in `../run3/`. Everything in run 3 still applies, except what 
 - `best.pt` is chosen by validation webbing Dice.
 - Memory: `--mem=64G` (49 GB staged in RAM-backed `/tmp` + about 10 GB for training).
 - Submit: `CONFIG=configs/v3_finetune.yaml DATA=Data_v3 INIT=runs/v2_finetune/best.pt sbatch -t 12:00:00 --mem=64G jobs/train_turing.sbatch`
-- Smoke test: `configs/v3_finetune_smoke.yaml` (job 2528504).
+- Smoke test: `configs/v3_finetune_smoke.yaml` (2 × 50 steps, 100-view validation). First submitted as job 2528504 (L40S only, cancelled while queued), rerun as **job 2528710**: passed in 6 min 55 s on an L40S.
+  - staging 50 GB took 255 s; r2 weights loaded with the head remapping; `pos_weight` [29.7, 30]
+  - epoch 1 → 2: loss 3.71 → 1.28, consistency 0.615 → 0.208; gradient clipped 94% of steps in epoch 1 (fresh cord centerline head), 24% in epoch 2
+  - validation after 100 steps: webbing Dice 0.904, `tprec` 0.910, cord Dice 0.844, hardware Dice 0.939
+  - peak GPU memory 37.5 GB (fits L40S / A100-80G / H100 / H200, not A30)
+- **Connected components (`cc`) are not used for v3 comparisons.** Webbing is labeled visible-only, so every crossing cord or tape splits a strap: GT has about 60 components per image (old amodal strap: about 9). Still logged.
+
+## GPUs
+- The env's PyTorch 2.14 + CUDA 12.6 supports up to sm_90; bf16 and about 38 GB of GPU memory are needed.
+  - Compatible: L40S (48 GB), A100-80G, H100, H200.
+  - Not compatible: RTX PRO 6000 Blackwell (sm_120, needs a CUDA 12.8+ PyTorch), V100 (no bf16), A30 (24 GB).
+- All partitions share the same nodes; account `nitin` has QOS `short`, `quick` and `long`.
+- Jobs now take the first free compatible GPU: `--gres=gpu:1 --constraint="L40S|A100-80G|H100|H200"`.
+
+## Full runs (2026-11-17)
+- **r3** (fine-tune from r2), **job 2529511**:
+  `CONFIG=configs/v3_finetune.yaml DATA=Data_v3 INIT=runs/v2_finetune/best.pt sbatch -t 12:00:00 --mem=64G --gres=gpu:1 --constraint="L40S|A100-80G|H100|H200" jobs/train_turing.sbatch`
+- **fromscratch** (`configs/fromscratch_a22.yaml`), **job 2529512**: the same data, classes, losses and validation as r3, but no `INIT`.
+  - encoder: timm ImageNet `resnet34.a1_in1k` (cached in `hf_cache`, checked); decoder and heads random
+  - run 1's from-scratch optimization: learning rate 1e-4 / 1e-3, encoder frozen in epoch 1, warmup 1 epoch, 30 epochs; validation and snapshots every 3 epochs; seed 42 (same shuffle order as r3)
+  - no smoke test of this config, and no consistency ramp (weight 0.5 from step 0), by decision
+  - `CONFIG=configs/fromscratch_a22.yaml DATA=Data_v3 sbatch -t 24:00:00 --mem=64G --gres=gpu:1 --constraint="L40S|A100-80G|H100|H200" jobs/train_turing.sbatch`
+- **Comparison:** equal compute (fromscratch at epoch 15 vs r3 at epoch 15) and best vs best; validation, test, and the real photos in `A22/`.
 
 ## Code changes (config-driven; r1/r2 configs behave as before)
 - `losses.py`: optional ignore map (Dice, focal, clDice, BCE, consistency); several centerline channels with per-channel `pos_weight`; consistency term; clDice entries for classes the model does not have are skipped.
@@ -57,4 +79,43 @@ Run 3 records are in `../run3/`. Everything in run 3 still applies, except what 
 - `confusion.py`: on single-label data the config's class order is used; ignored pixels are left out.
 - `predict_images.py`: v3 overlay (webbing centerline white, cord cyan).
 - `tests/test_v3.py`: 5 new tests (two heads, perfect vs noisy loss, ignore region, consistency, head remapping). All 21 tests pass.
+- `configs/fromscratch_a22.yaml`: from-scratch run (see Full runs).
 - `CLAUDE.md`: "explain" = brief; long explanations only for "explain in detail".
+
+## Results (full runs finished 2026-11-18)
+- **r3** (`runs/v3_finetune`, job 2529511): 15 epochs, about 18.5 min/epoch, peak GPU 37.5 GB. **fromscratch** (`runs/fromscratch_a22`, job 2529512): 30 epochs, about 23.7 min/epoch, peak 34.4 GB.
+- Validation Dice (7,200 views, threshold 0.5):
+
+| class | r3 ep 15 | fromscratch ep 15 | fromscratch ep 30 |
+|---|---|---|---|
+| webbing | 0.9647 | 0.9655 | 0.9673 |
+| cargo_cover | 0.9924 | 0.9932 | 0.9935 |
+| cord_or_tie | 0.9144 | 0.9110 | 0.9149 |
+| attachment_hardware | 0.9837 | 0.9831 | 0.9832 |
+| tape | 0.9719 | 0.9729 | 0.9728 |
+| skid_board | 0.9934 | 0.9940 | 0.9943 |
+| honeycomb | 0.9962 | 0.9964 | 0.9965 |
+| parachute_bag | 0.9809 | 0.9641 | 0.9734 |
+
+- clDice (webbing / cord): r3 0.979 / 0.938, fromscratch 0.979 / 0.938. Train total loss: r3 0.428 (ep 15), fromscratch 0.407 (ep 15) and 0.376 (ep 30). Consistency term about 0.02 in both.
+- `best.pt` (by webbing Dice): r3 epoch 15, fromscratch epoch 30.
+- Reading: at equal compute the two runs are within about 0.003 Dice on every class except parachute_bag (noisy: fromscratch dips at epochs 12 and 15). fromscratch is ahead on webbing, cargo_cover, tape, skid_board, honeycomb; r3 on cord_or_tie and attachment_hardware. The r2 initialization does not clearly beat the ImageNet encoder on this data. Test split and real photos not yet compared.
+- Topology precision < sensitivity on validation (webbing 0.968 / 0.989; cord 0.916 / 0.960): the models over-predict slightly, they are not conservative there.
+- Plots: `runs/val_dice_r3_vs_fromscratch.png` (validation Dice per class vs epoch), `runs/train_loss_r3_vs_fromscratch.png`. No validation loss is logged, only validation metrics every 3 epochs; a true validation loss would need a separate eval job.
+- `runs/<run>/vis/epoch_XXX/` holds the first 4 validation images (family f000700, view v00, states E01/E03/E04/E05, near-duplicates), webbing only: image | GT | error map (green TP, red FP, blue FN) | centerline probability.
+
+## Real photos (2026-11-18/19)
+- Two new webcam photos `A22/WIN_20261117_14_41_05_Pro.jpg.jpeg`, `..._14_42_38_Pro.jpg.jpeg` (2160×3840, portrait) added to `runs/a22_real/input_768/` (now 18 images).
+- **Decision: pad to square, no crop.** Resized to 432×768 (Lanczos), centered in 768×768 with **black** side padding (168 px each side). A center crop would cut 22% off the top and bottom (parachute bag, honeycomb, ties). Reflect padding was tried first and rejected: it mirrored the package.
+- Inference of r3 and fromscratch only (r1/r2 not run on the new photos): `jobs/predict_real_v3.sbatch` → `runs/a22_real/pred_r3/`, `pred_fromscratch/`. Job 2540054 (`quick`, 1 GPU, 2 CPUs, 8 GB, no GPU-type constraint), 32 s. An earlier run (job 2538567) used the bad reflect-padded inputs and was overwritten.
+- Console output (fraction of the 768×768 image, black padding included): attachment_hardware and tape are 0.0% on every image, both models. Webbing is lower on the photos (r3 2.4% / 4.0%, fromscratch 0.7% / 1.4% on the new ones) than the 7% in training. Probably a domain gap (render vs photo); probability maps not yet checked (open: threshold 0.3 on photos, color/texture augmentation).
+
+## Cluster notes
+- `quick` partition (12 h, same nodes as `short`) is available to account `nitin`; used for the inference job.
+- A30 (24 GB) estimate: r3 about 10-13 h, fromscratch about 20-27 h with batch 8 × grad_accum 2 (not run). Inference fits an A30 (fp32, one image at a time).
+- Multi-GPU: `train.py` supports DDP on one node (`torchrun --standalone`, chosen by `jobs/train_turing.sbatch` when more than one GPU). Staging is once per node (49 GB shared by all ranks). `batch_size` is per GPU (4 GPUs × 16 = 64; use 4 per GPU to keep 16), no SyncBN, validation runs on rank 0 only. Not tested; multi-node not supported.
+- `jobs/predict_real_v3.sbatch` has no GPU-type constraint; on an RTX PRO 6000 Blackwell node (sm_120) it would likely fail.
+
+## Status note (2026-11-20)
+- `runs/v3_finetune/best.pt` (r3, epoch 15) is the model trained sequentially over the datasets (run 1 `Data` → r2 `Data_v2` → r3 `Data_v3`; r1 `Data_v1` is a side branch, r2 started from run 1), and it has **the best results on real data so far** (user's visual review of the real-photo overlays; no metric exists). It is committed with its `config.yaml` and `log.csv`.
+- Full hand-over document for a new session: `ref_nov20.md` (repo root). Environment: `environment.yml`.

@@ -1,6 +1,7 @@
 # Run 4 (r3): fine-tune r2 (runs/v2_finetune/best.pt) on Data_v3 (single_a22_physical_v13: single A-22,
 # single label per pixel, MS COCO backgrounds). Same optimization as r1/r2 (v1_finetune.yaml).
 # Submit with INIT=runs/v2_finetune/best.pt DATA=Data_v3 and --mem=64G (jobs/train_turing.sbatch).
+# GPU: --gres=gpu:1 --constraint="L40S|A100-80G|H100|H200"
 base: v2_finetune.yaml
 
 data:

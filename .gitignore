@@ -10,3 +10,5 @@ A22/
 dataset_main/
 __pycache__/
 *.zip
+env/
+*.out
