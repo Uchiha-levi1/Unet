@@ -12,3 +12,4 @@ __pycache__/
 *.zip
 env/
 *.out
+env
