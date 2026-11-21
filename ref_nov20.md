@@ -5,7 +5,7 @@ Details per step are in `exploration/run1..run4/` and `results_r1.md`; this file
 
 ## 1. Where things stand
 - **Goal:** segment the parts of a rigged A-22 cargo bag (webbing straps, cords, hardware, tape, cargo cover, ...) and the strap and cord **centerlines**, from one RGB image (768×768), as the base for later defect detection. Training data is synthetic (Blender renders on photo backgrounds); the target is real photos.
-- **Current best model:** `runs/v3_finetune/best.pt` (r3, epoch 15, committed to git together with its `config.yaml` and `log.csv`).
+- **Current best model:** `runs/v3_finetune/best.pt` (r3, epoch 15, 106 MB). It is **not on `main`**, because it exceeds GitHub's 100 MB file limit. Its `config.yaml` and `log.csv` are committed. The checkpoint is on the local branch `checkpoint-r3` (commit `7a660a6`) and at `/scratch/vchezhian/Unet/runs/v3_finetune/best.pt` on Turing; share it as a release asset or a file link.
   - It is the model that was **trained sequentially over the datasets**: run 1 (`Data`) → r2 (`Data_v2`) → r3 (`Data_v3`). Note: r1 (`Data_v1`) was a separate fine-tune of run 1 and is not part of this chain, because r2 started from run 1's weights, not r1's.
   - Per the user's review of the real-photo overlays, it has **the best results on real data so far**. This is a visual judgement; no metric on real photos exists (there is no ground truth for them).
 - **Comparison model:** `fromscratch_a22` (same data, classes and losses as r3, but started from the ImageNet encoder). Its validation numbers are about equal to r3's.
@@ -102,14 +102,14 @@ CONFIG=configs/fromscratch_a22.yaml DATA=Data_v3 sbatch -t 24:00:00 --mem=64G \
 - **Turing specifics:** `module load miniconda3`; the sbatch files use `REPO=/home/vchezhian/scratch/Unet`, `--account=nitin`, partition `short` (also `quick` 12 h, `long` 7 days) and `HF_HOME=/home/vchezhian/scratch/hf_cache HF_HUB_OFFLINE=1`. **Change these for another user.** Download the encoder once on the login node: `timm.create_model("resnet34.a1_in1k", pretrained=True)` with `HF_HOME` set; jobs run offline.
 - **Tests:** `pytest` (21 tests; run through `srun`, not on the login node).
 - **To use the committed model:** `python -m src.predict_images --config runs/v3_finetune/config.yaml --checkpoint runs/v3_finetune/best.pt --images <folder of 768-multiple-of-32 images> --out <dir>`.
-- **Not in git:** `Data*/` (regenerable), `bg/`, `A22/`, `runs/` except the files listed in section 10, `env/`, and the r2 weights `runs/v2_finetune/best.pt` (needed as `INIT` to repeat r3 exactly; the fromscratch config needs none).
+- **Not in git:** `Data*/` (regenerable), `bg/`, `A22/`, `runs/` except the files listed in section 10 (so also the r3 `best.pt`), `env/`, and the r2 weights `runs/v2_finetune/best.pt` (needed as `INIT` to repeat r3 exactly; the fromscratch config needs none).
 
 ## 10. File map
 - `src/`: `model.py`, `losses.py`, `data.py`, `train.py`, `metrics.py`, `infer.py` (evaluation), `confusion.py`, `predict_images.py`, `preprocess.py` (run 1), `preprocess_v1.py`, `composite_v2.py`, `preprocess_v3.py` (current).
 - `configs/`: `default.yaml` → `turing.yaml` → `v1_finetune.yaml` → `v2_finetune.yaml` → `v3_finetune.yaml` (each uses `base:`) → `v3_finetune_smoke.yaml`; `fromscratch_a22.yaml` inherits `v3_finetune.yaml`. The resolved config of every run is saved as `runs/<run>/config.yaml`.
 - `jobs/`: `train_turing.sbatch`, `eval_turing.sbatch`, `confusion_turing.sbatch`, `predict_real_v3.sbatch`, `preprocess_v3*.sbatch` and `preprocess_v3_submit.sh`, plus the older `preprocess_v1*`, `composite_v2*` and `overfit_turing.sbatch`.
 - `exploration/run1..run4/`: decisions and changes per round (`run4/changes.md` is the most detailed record of Data_v3 and r3). `results_r1.md`: r1 results.
-- Committed binaries: `runs/v3_finetune/{best.pt,config.yaml,log.csv}`, `runs/a22_real/input_768/`.
+- Committed binaries: `runs/a22_real/input_768/`. Committed with the checkpoint: `runs/v3_finetune/{config.yaml,log.csv}`. `best.pt` is not on `main` (size limit), see section 1.
 
 ## 11. Suggestions for the next session
 1. Evaluate r3 and fromscratch on the Data_v3 test split and build confusion matrices (cheap: 1 GPU, about 1 h).

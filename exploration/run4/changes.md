@@ -117,5 +117,5 @@ Run 3 records are in `../run3/`. Everything in run 3 still applies, except what 
 - `jobs/predict_real_v3.sbatch` has no GPU-type constraint; on an RTX PRO 6000 Blackwell node (sm_120) it would likely fail.
 
 ## Status note (2026-11-20)
-- `runs/v3_finetune/best.pt` (r3, epoch 15) is the model trained sequentially over the datasets (run 1 `Data` → r2 `Data_v2` → r3 `Data_v3`; r1 `Data_v1` is a side branch, r2 started from run 1), and it has **the best results on real data so far** (user's visual review of the real-photo overlays; no metric exists). It is committed with its `config.yaml` and `log.csv`.
+- `runs/v3_finetune/best.pt` (r3, epoch 15) is the model trained sequentially over the datasets (run 1 `Data` → r2 `Data_v2` → r3 `Data_v3`; r1 `Data_v1` is a side branch, r2 started from run 1), and it has **the best results on real data so far** (user's visual review of the real-photo overlays; no metric exists). It is not on `main` (106 MB, over GitHub's 100 MB file limit); it is on the local branch `checkpoint-r3` and at `runs/v3_finetune/best.pt`. Its `config.yaml` and `log.csv` are committed.
 - Full hand-over document for a new session: `ref_nov20.md` (repo root). Environment: `environment.yml`.
