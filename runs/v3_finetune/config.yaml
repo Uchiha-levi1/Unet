@@ -1,0 +1,126 @@
+seed: 42
+data:
+  root: /tmp/2529511/Data_v3
+  num_workers: 8
+  normalization: imagenet
+  blur_noise_p: 0.1
+  blur_sigma:
+  - 0.3
+  - 0.7
+  noise_std:
+  - 2.0
+  - 5.0
+  line_keys:
+  - webbing_cl_1px
+  - webbing_cl_3px
+  - cord_cl_1px
+  - cord_cl_3px
+  ignore_key: data_tag
+model:
+  encoder: resnet34
+  pretrained: true
+  classes:
+  - webbing
+  - cargo_cover
+  - cord_or_tie
+  - attachment_hardware
+  - tape
+  - skid_board
+  - honeycomb
+  - parachute_bag
+  branch_channels: 64
+  deep_supervision: false
+  deep_supervision_classes:
+  - cargo_cover
+  - parachute_bag
+  - honeycomb
+  - skid_board
+  grad_checkpointing: false
+  centerlines:
+  - webbing_cl_3px
+  - cord_cl_3px
+  primary_class: webbing
+loss:
+  class_weights:
+    strap: 1.0
+    cord_or_tie: 1.5
+    hardware: 1.0
+    pack_band: 0.5
+    tape: 0.5
+    data_tag: 0.5
+    cargo_cover: 0.25
+    parachute_bag: 0.25
+    honeycomb: 0.25
+    skid_board: 0.25
+    webbing: 1.0
+    attachment_hardware: 1.0
+  focal_gamma: 2.0
+  focal_alpha: null
+  cldice:
+    strap:
+      weight: 2.0
+      iters: 5
+      skeleton: strap_cl_1px
+    cord_or_tie:
+      weight: 2.0
+      iters: 3
+      skeleton: cord_cl_1px
+    webbing:
+      weight: 2.0
+      iters: 5
+      skeleton: webbing_cl_1px
+  centerline_bce: 1.0
+  pos_weight_cap: 30.0
+  consistency:
+    weight: 0.5
+    support:
+    - webbing
+    - cord_or_tie
+    - tape
+    - attachment_hardware
+train:
+  out_dir: runs/v3_finetune
+  epochs: 15
+  batch_size: 16
+  grad_accum: 1
+  lr_encoder: 3.0e-05
+  lr_decoder: 0.0003
+  min_lr_ratio: 0.01
+  weight_decay: 0.01
+  warmup_epochs: 0.3
+  freeze_encoder_epochs: 0
+  freeze_encoder_bn: false
+  grad_clip: 1.0
+  amp: true
+  val_every: 3
+  val_mode: full
+  val_subset_size: 40
+  snapshot_every: 3
+  num_vis: 4
+  snapshot_subdir: snapshots
+  init_head_map:
+    classes:
+    - strap
+    - cargo_cover
+    - cord_or_tie
+    - hardware
+    - tape
+    - skid_board
+    - honeycomb
+    - parachute_bag
+    - data_tag
+    - pack_band
+    mask:
+      webbing: strap
+      cargo_cover: cargo_cover
+      cord_or_tie: cord_or_tie
+      attachment_hardware: hardware
+      tape: tape
+      skid_board: skid_board
+      honeycomb: honeycomb
+      parachute_bag: parachute_bag
+    centerline:
+      0: 0
+eval:
+  batch_size: 16
+  threshold: 0.5
